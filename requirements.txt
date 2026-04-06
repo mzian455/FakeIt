@@ -1,0 +1,3 @@
+# For FakeIt/fakeit_location_bridge.py — install on the Mac that runs the app:
+#   pip3 install -r requirements.txt
+pymobiledevice3>=9.0
