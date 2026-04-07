@@ -33,6 +33,14 @@ final class SearchCompleterModel: NSObject, ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Clears the field, suggestion list, and completer state immediately (no debounce wait).
+    func clearSearch() {
+        queryFragment = ""
+        completions = []
+        isSearching = false
+        completer.queryFragment = ""
+    }
+
     /// Keep suggestions biased to what the user sees (same idea as Apple Maps).
     func updateMapRegion(_ region: MKCoordinateRegion) {
         regionBiasWorkItem?.cancel()

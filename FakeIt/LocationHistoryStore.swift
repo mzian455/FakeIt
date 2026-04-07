@@ -1,8 +1,13 @@
 import Foundation
 
 final class LocationHistoryStore {
-    private let key = "fakeit.spoofHistory"
-    private let maxCount = 10
+    private let key: String
+    private let maxCount: Int
+
+    init(key: String = "fakeit.spoofHistory", maxCount: Int = 10) {
+        self.key = key
+        self.maxCount = maxCount
+    }
 
     func load() -> [SavedSpoofLocation] {
         guard let data = UserDefaults.standard.data(forKey: key),
@@ -24,5 +29,15 @@ final class LocationHistoryStore {
         list.removeAll { abs($0.latitude - entry.latitude) < 1e-8 && abs($0.longitude - entry.longitude) < 1e-8 }
         list.insert(entry, at: 0)
         save(list)
+    }
+
+    func remove(id: UUID) {
+        var list = load()
+        list.removeAll { $0.id == id }
+        save(list)
+    }
+
+    func clearAll() {
+        save([])
     }
 }

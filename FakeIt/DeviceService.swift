@@ -75,6 +75,53 @@ enum DeviceService {
         return CommandResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
     }
 
+    /// GUI apps often inherit a tiny `PATH`, so Homebrew/pyenv Python is invisible to child processes.
+    private static func subprocessEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        let pathPrefix = [
+            "\(home)/.local/bin",
+            "\(home)/.pyenv/shims",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ].joined(separator: ":")
+        let existing = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = pathPrefix + ":" + existing
+        if env["HOME"] == nil || env["HOME"]!.isEmpty { env["HOME"] = home }
+        env["PYTHONUNBUFFERED"] = "1"
+        return env
+    }
+
+    private static func orderedPythonsWithPymobile() -> [String] {
+        let venvPy = bundledVenvPythonPath
+        var ordered: [String] = []
+        var seen = Set<String>()
+        if FileManager.default.isExecutableFile(atPath: venvPy) {
+            ordered.append(venvPy)
+            seen.insert(venvPy)
+        }
+        for p in python3CandidatePaths() where !seen.contains(p) {
+            ordered.append(p)
+            seen.insert(p)
+        }
+        let env = subprocessEnvironment()
+        return ordered.filter {
+            run(executable: $0, arguments: ["-c", "import pymobiledevice3"], environment: env).exitCode == 0
+        }
+    }
+
+    private static func tailOfTunneldLog(maxBytes: Int = 2400) -> String {
+        let url = tunneldLogFileURL
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return "(no log yet — see \(url.path))"
+        }
+        let slice = data.suffix(maxBytes)
+        let s = String(data: slice, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return s.isEmpty ? "(log not UTF-8)" : s
+    }
+
     static func listPhysicalDevices() -> (devices: [ConnectedDevice], rawOutput: String) {
         let r = run(executable: "/usr/bin/xcrun", arguments: ["xctrace", "list", "devices"])
         let combined = r.stdout + (r.stderr.isEmpty ? "" : "\n" + r.stderr)
@@ -213,19 +260,20 @@ enum DeviceService {
     }
 
     private static func pythonExecutableForPymobile() -> String? {
+        let env = subprocessEnvironment()
         let venvPy = bundledVenvPythonPath
         if FileManager.default.isExecutableFile(atPath: venvPy),
-           run(executable: venvPy, arguments: ["-c", "import pymobiledevice3"]).exitCode == 0 {
+           run(executable: venvPy, arguments: ["-c", "import pymobiledevice3"], environment: env).exitCode == 0 {
             return venvPy
         }
         for py in python3CandidatePaths() {
-            if run(executable: py, arguments: ["-c", "import pymobiledevice3"]).exitCode == 0 {
+            if run(executable: py, arguments: ["-c", "import pymobiledevice3"], environment: env).exitCode == 0 {
                 return py
             }
         }
         if prepareBundledVenvIfNeeded() == nil,
            FileManager.default.isExecutableFile(atPath: venvPy),
-           run(executable: venvPy, arguments: ["-c", "import pymobiledevice3"]).exitCode == 0 {
+           run(executable: venvPy, arguments: ["-c", "import pymobiledevice3"], environment: env).exitCode == 0 {
             return venvPy
         }
         return nil
@@ -251,6 +299,8 @@ enum DeviceService {
             String(latitude),
             String(longitude)
         ]
+        proc.environment = subprocessEnvironment()
+        proc.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         if let stdin = try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/dev/null")) {
             proc.standardInput = stdin
         }
@@ -620,73 +670,138 @@ enum DeviceService {
         if tunneldHTTPEndpointResponds() { return }
 
         _ = prepareBundledVenvIfNeeded()
+        let candidates = orderedPythonsWithPymobile()
+        let logURL = tunneldLogFileURL
+        let logPath = logURL.path
 
-        let venvPy = bundledVenvPythonPath
-        guard FileManager.default.isExecutableFile(atPath: venvPy) else { return }
-        let importCheck = run(executable: venvPy, arguments: ["-c", "import pymobiledevice3"])
-        guard importCheck.exitCode == 0 else { return }
-
-        tunneldStateLock.lock()
-        defer { tunneldStateLock.unlock() }
-        if tunneldHTTPEndpointResponds() { return }
-        if let existing = tunneldChildProcess, existing.isRunning { return }
-
-        let logPath = tunneldLogFileURL.path
-        FileManager.default.createFile(atPath: logPath, contents: nil, attributes: nil)
-        guard let logHandle = try? FileHandle(forWritingTo: tunneldLogFileURL) else { return }
-        try? logHandle.seekToEnd()
-        let stamp = "\n\n--- FakeIt started tunneld \(ISO8601DateFormatter().string(from: Date())) ---\n"
-        if let data = stamp.data(using: .utf8) {
-            try? logHandle.write(contentsOf: data)
-        }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: venvPy)
-        proc.arguments = ["-m", "pymobiledevice3", "remote", "tunneld"]
-        if let stdin = try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/dev/null")) {
-            proc.standardInput = stdin
-        }
-        proc.standardOutput = logHandle
-        proc.standardError = logHandle
-
-        let procRef = proc
-        proc.terminationHandler = { p in
-            tunneldStateLock.lock()
-            defer { tunneldStateLock.unlock() }
-            if tunneldChildProcess === p {
-                tunneldChildProcess = nil
-                fakeItOwnsTunneldProcess = false
-            }
-            try? logHandle.write(contentsOf: "\n--- tunneld exited \(p.terminationStatus) ---\n".data(using: .utf8) ?? Data())
-            try? logHandle.close()
-        }
-
-        do {
-            try proc.run()
-            tunneldChildProcess = procRef
-            fakeItOwnsTunneldProcess = true
-        } catch {
+        if candidates.isEmpty {
             DispatchQueue.main.async {
                 NotificationCenter.default.post(
                     name: .fakeItTunneldFailed,
                     object: nil,
-                    userInfo: ["reason": "Could not start tunneld: \(error.localizedDescription)"]
+                    userInfo: ["reason": """
+                    Cannot start tunneld: no Python with pymobiledevice3 found. \
+                    Install once: pip3 install -r requirements.txt (or pip3 install 'pymobiledevice3>=9'). \
+                    Then reopen FakeIt.
+                    """]
                 )
             }
-            try? logHandle.close()
             return
         }
 
-        // Uvicorn needs a moment; pairing prompts on the iPhone are driven once the tunnel task runs.
-        Thread.sleep(forTimeInterval: 1.2)
-        if !tunneldHTTPEndpointResponds(), !procRef.isRunning {
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(
-                    name: .fakeItTunneldFailed,
-                    object: nil,
-                    userInfo: ["reason": "tunneld stopped — check ~/Library/Application Support/FakeIt/tunneld.log (e.g. port 49151 already in use)."]
-                )
+        var lastTriedPython = candidates.first ?? "/usr/bin/python3"
+        for pyPath in candidates {
+            lastTriedPython = pyPath
+            if tunneldHTTPEndpointResponds() { return }
+
+            tunneldStateLock.lock()
+            if let existing = tunneldChildProcess, existing.isRunning {
+                tunneldStateLock.unlock()
+                return
             }
+            tunneldStateLock.unlock()
+
+            FileManager.default.createFile(atPath: logPath, contents: nil, attributes: nil)
+            guard let childLog = try? FileHandle(forWritingTo: logURL) else { continue }
+            try? childLog.seekToEnd()
+            let stamp = "\n\n--- FakeIt tunneld \(ISO8601DateFormatter().string(from: Date())) ---\npython: \(pyPath)\n"
+            if let data = stamp.data(using: .utf8) {
+                try? childLog.write(contentsOf: data)
+            }
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: pyPath)
+            proc.arguments = ["-u", "-m", "pymobiledevice3", "remote", "tunneld"]
+            proc.environment = subprocessEnvironment()
+            proc.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            if let stdin = try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/dev/null")) {
+                proc.standardInput = stdin
+            }
+            proc.standardOutput = childLog
+            proc.standardError = childLog
+
+            let procRef = proc
+            let logURLCapture = logURL
+            proc.terminationHandler = { p in
+                tunneldStateLock.lock()
+                defer { tunneldStateLock.unlock() }
+                if tunneldChildProcess === p {
+                    tunneldChildProcess = nil
+                    fakeItOwnsTunneldProcess = false
+                }
+                if let line = "\n--- tunneld exited (status \(p.terminationStatus)) ---\n".data(using: .utf8),
+                   let h = try? FileHandle(forWritingTo: logURLCapture) {
+                    try? h.seekToEnd()
+                    try? h.write(contentsOf: line)
+                    try? h.close()
+                }
+                try? childLog.close()
+            }
+
+            tunneldStateLock.lock()
+            if tunneldHTTPEndpointResponds() {
+                tunneldStateLock.unlock()
+                try? childLog.close()
+                continue
+            }
+            if let existing = tunneldChildProcess, existing.isRunning {
+                tunneldStateLock.unlock()
+                try? childLog.close()
+                return
+            }
+
+            do {
+                try proc.run()
+                tunneldChildProcess = procRef
+                fakeItOwnsTunneldProcess = true
+            } catch {
+                tunneldStateLock.unlock()
+                try? childLog.close()
+                continue
+            }
+            tunneldStateLock.unlock()
+
+            for delay in [0.5, 0.7, 1.0, 1.4, 1.8] {
+                Thread.sleep(forTimeInterval: delay)
+                if tunneldHTTPEndpointResponds() { return }
+                if !procRef.isRunning { break }
+            }
+
+            if tunneldHTTPEndpointResponds() { return }
+
+            tunneldStateLock.lock()
+            let ownedHere = tunneldChildProcess === procRef
+            if ownedHere {
+                tunneldChildProcess = nil
+                fakeItOwnsTunneldProcess = false
+            }
+            tunneldStateLock.unlock()
+            if ownedHere, procRef.isRunning {
+                procRef.terminate()
+                procRef.waitUntilExit()
+            }
+        }
+
+        let tail = tailOfTunneldLog()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .fakeItTunneldFailed,
+                object: nil,
+                userInfo: ["reason": """
+                tunneld could not be started automatically (needed for iOS 17+).
+
+                In Terminal run (use your Mac password when asked):
+                sudo \(lastTriedPython) -m pymobiledevice3 remote tunneld
+
+                Leave that window open, unlock the iPhone, approve pairing, then try Simulate again.
+
+                Full log file:
+                \(logPath)
+
+                Last log lines:
+                \(tail)
+                """]
+            )
         }
     }
 }

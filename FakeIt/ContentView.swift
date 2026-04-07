@@ -13,10 +13,10 @@ struct ContentView: View {
     @State private var latText = ""
     @State private var lonText = ""
     @State private var spoofPhase: SpoofButtonPhase = .idle
-    @State private var showParticles = false
     @State private var uiVisible = false
     @State private var searchExpanded = false
     @State private var recent: [SavedSpoofLocation] = []
+    @State private var searchHistory: [SavedSpoofLocation] = []
     @State private var lastInjectionError: String = ""
     @State private var deviceRefreshTimer: Timer?
     @State private var tunneldNotice: String?
@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var skipNextSearchQueryReaction = false
 
     private let historyStore = LocationHistoryStore()
+    private let searchHistoryStore = LocationHistoryStore(key: "fakeit.searchHistory")
 
     private var canGoToLocation: Bool {
         let q = search.queryFragment.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -49,12 +50,10 @@ struct ContentView: View {
                     .animation(FakeItTheme.spring, value: mapState.pinOverlayScreenPoint)
             }
 
-            ParticleBurstView(isActive: showParticles)
-
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top, spacing: 0) {
                     leftGlassPanel
-                        .frame(width: 388)
+                        .frame(width: 360)
                         .frame(maxHeight: .infinity, alignment: .top)
                     Spacer(minLength: 0)
                 }
@@ -66,12 +65,14 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(16)
         }
+        .frame(minWidth: 920, idealWidth: 1240, minHeight: 580, idealHeight: 800)
         .background(FakeItTheme.background)
         .opacity(uiVisible ? 1 : 0)
         .animation(.easeOut(duration: 0.4), value: uiVisible)
         .onAppear {
             refreshDevices()
             recent = historyStore.load()
+            searchHistory = searchHistoryStore.load()
             uiVisible = true
             search.updateMapRegion(mapState.visibleMapRegion)
             DeviceService.ensureTunneldRunningForIOS17Support()
@@ -106,49 +107,152 @@ struct ContentView: View {
     }
 
     private var leftGlassPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("FakeIt")
-                .font(FakeItTheme.brandTitleFont(28))
-                .foregroundStyle(FakeItTheme.textPrimary)
-                .tracking(1.2)
-                .accessibilityAddTraits(.isHeader)
-
-            if let banner = deviceBanner {
-                Text(banner)
-                    .font(FakeItTheme.bodyFont(12, weight: .medium))
-                    .foregroundStyle(Color.orange.opacity(0.95))
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
-            }
-
-            if let tunnel = tunneldNotice {
-                Text(tunnel)
-                    .font(FakeItTheme.bodyFont(11, weight: .medium))
-                    .foregroundStyle(Color.yellow.opacity(0.92))
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.yellow.opacity(0.1)))
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Device")
-                    .font(FakeItTheme.bodyFont(11, weight: .semibold))
-                    .foregroundStyle(FakeItTheme.textSecondary)
-                Picker("Device", selection: $selectedDevice) {
-                    Text("Select iPhone…").tag(Optional<ConnectedDevice>.none)
-                    ForEach(devices) { d in
-                        Text(d.name).tag(Optional(d))
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("FakeIt")
+                        .font(FakeItTheme.brandTitleFont(22))
+                        .foregroundStyle(FakeItTheme.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Simulated location for development")
+                        .font(FakeItTheme.bodyFont(11, weight: .regular))
+                        .foregroundStyle(FakeItTheme.textSecondary.opacity(0.85))
                 }
-                .pickerStyle(.menu)
-                .tint(FakeItTheme.accent)
+
+                if let banner = deviceBanner {
+                    Text(banner)
+                        .font(FakeItTheme.bodyFont(12, weight: .medium))
+                        .foregroundStyle(Color.orange.opacity(0.92))
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.orange.opacity(0.1)))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.orange.opacity(0.22), lineWidth: 1))
+                }
+
+                if let tunnel = tunneldNotice {
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(tunnel)
+                            .font(FakeItTheme.bodyFont(11, weight: .medium))
+                            .foregroundStyle(Color(red: 0.95, green: 0.82, blue: 0.45))
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            tunneldNotice = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(Color.white.opacity(0.45))
+                                .symbolRenderingMode(.hierarchical)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss")
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.yellow.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.yellow.opacity(0.2), lineWidth: 1))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    panelSectionLabel("Device")
+                    Picker(selection: $selectedDevice) {
+                        Text("No iPhone selected").tag(Optional<ConnectedDevice>.none)
+                        ForEach(devices) { d in
+                            Text(d.name).tag(Optional(d))
+                        }
+                    } label: {
+                        EmptyView()
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FakeItTheme.textPrimary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(FakeItTheme.panelStroke, lineWidth: 1))
+                }
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Search")
-                    .font(FakeItTheme.bodyFont(11, weight: .semibold))
-                    .foregroundStyle(FakeItTheme.textSecondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    searchSection
+                    searchHistorySection
+                    coordinateSection
+                    recentSection
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: .infinity)
+
+            VStack(alignment: .leading, spacing: 12) {
+                SpoofActionButton(
+                    phase: $spoofPhase,
+                    canSimulate: canSimulateOnDevice,
+                    onSpoof: { performSpoof() },
+                    onResetIdle: {
+                        spoofPhase = .idle
+                        mapState.pinSuccessGlow = false
+                        lastInjectionError = ""
+                    }
+                )
+
+                Button("Reset Location") {
+                    runReset()
+                }
+                .buttonStyle(.bordered)
+                .tint(FakeItTheme.textSecondary)
+                .foregroundStyle(FakeItTheme.textPrimary)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+
+                if !lastInjectionError.isEmpty, case .failure = spoofPhase {
+                    Text(lastInjectionError)
+                        .font(FakeItTheme.bodyFont(10))
+                        .foregroundStyle(Color.red.opacity(0.9))
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(12)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.top, 14)
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(FakeItTheme.panelSurface.opacity(0.97))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(FakeItTheme.panelStroke, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 24, x: 0, y: 14)
+    }
+
+    private var canClearSearch: Bool {
+        let q = search.queryFragment.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !q.isEmpty || selectedCompletionIndex != nil || !search.completions.isEmpty
+    }
+
+    private var searchSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center) {
+                panelSectionLabel("Search")
+                Spacer(minLength: 8)
+                Button("Clear search") {
+                    clearSearchQuery()
+                }
+                .font(FakeItTheme.bodyFont(11, weight: .semibold))
+                .foregroundStyle(FakeItTheme.actionBlue)
+                .buttonStyle(.plain)
+                .disabled(!canClearSearch)
+                .opacity(canClearSearch ? 1 : 0.38)
+            }
 
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
@@ -160,8 +264,21 @@ struct ContentView: View {
                         .foregroundStyle(Color.black.opacity(0.88))
                         .onTapGesture { searchExpanded = true }
                         .onSubmit { goToLocation() }
+                    if canClearSearch {
+                        Button {
+                            clearSearchQuery()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(Color.black.opacity(0.35))
+                                .symbolRenderingMode(.hierarchical)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear search")
+                    }
                 }
-                .padding(.horizontal, 14)
+                .padding(.leading, 14)
+                .padding(.trailing, 10)
                 .padding(.vertical, 11)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -205,7 +322,7 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(selectedCompletionIndex == index ? FakeItTheme.accent.opacity(0.12) : Color.clear)
+                                        .fill(selectedCompletionIndex == index ? FakeItTheme.actionBlue.opacity(0.14) : Color.clear)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -245,50 +362,141 @@ struct ContentView: View {
                     .padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.0, green: 0.48, blue: 1.0))
+                .tint(FakeItTheme.actionBlue)
                 .disabled(!canGoToLocation || isGoingToLocation)
 
                 Text("Select a suggestion or enter an address, then go to the pin on the map. After that you can simulate on your iPhone.")
                     .font(FakeItTheme.bodyFont(10))
                     .foregroundStyle(FakeItTheme.textSecondary.opacity(0.9))
                     .fixedSize(horizontal: false, vertical: true)
-            }
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle(isOn: $coordinateMode.animation(FakeItTheme.spring)) {
-                    Text("Coordinate input")
-                        .font(FakeItTheme.bodyFont(12, weight: .semibold))
-                        .foregroundStyle(FakeItTheme.textSecondary)
-                }
-                .toggleStyle(.switch)
-                .tint(FakeItTheme.accent)
-
-                if coordinateMode {
-                    HStack(spacing: 8) {
-                        TextField("Latitude", text: $latText)
-                            .textFieldStyle(.roundedBorder)
-                        TextField("Longitude", text: $lonText)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    Button("Go to coordinates") {
-                        applyManualCoordinates()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(FakeItTheme.secondaryAccent)
-                    .controlSize(.small)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Recent")
-                    .font(FakeItTheme.bodyFont(11, weight: .semibold))
+    private var coordinateSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $coordinateMode.animation(FakeItTheme.spring)) {
+                Text("Coordinate input")
+                    .font(FakeItTheme.bodyFont(12, weight: .semibold))
                     .foregroundStyle(FakeItTheme.textSecondary)
-                if recent.isEmpty {
-                    Text("No spoof history yet.")
-                        .font(FakeItTheme.bodyFont(11))
-                        .foregroundStyle(FakeItTheme.textSecondary.opacity(0.8))
-                } else {
-                    ForEach(recent.prefix(10)) { item in
+            }
+            .toggleStyle(.switch)
+            .tint(FakeItTheme.actionBlue)
+
+            if coordinateMode {
+                HStack(spacing: 8) {
+                    TextField("Latitude", text: $latText)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Longitude", text: $lonText)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Button("Go to coordinates") {
+                    applyManualCoordinates()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(FakeItTheme.actionBlue)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var searchHistorySection: some View {
+        if !searchHistory.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center) {
+                    panelSectionLabel("Search History")
+                    Spacer(minLength: 8)
+                    Button("Clear history") {
+                        searchHistoryStore.clearAll()
+                        searchHistory = []
+                    }
+                    .font(FakeItTheme.bodyFont(11, weight: .semibold))
+                    .foregroundStyle(FakeItTheme.actionBlue)
+                    .buttonStyle(.plain)
+                }
+
+                ForEach(searchHistory.prefix(5)) { item in
+                    HStack(alignment: .center, spacing: 8) {
+                        Button {
+                            searchHistoryStore.remove(id: item.id)
+                            searchHistory = searchHistoryStore.load()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 17))
+                                .foregroundStyle(FakeItTheme.textSecondary.opacity(0.5))
+                                .symbolRenderingMode(.hierarchical)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove from search history")
+
+                        Button {
+                            reapplySearchHistory(item)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.name)
+                                        .font(FakeItTheme.bodyFont(12, weight: .medium))
+                                        .foregroundStyle(FakeItTheme.textPrimary)
+                                        .lineLimit(1)
+                                    Text(String(format: "%.5f, %.5f", item.latitude, item.longitude))
+                                        .font(FakeItTheme.bodyFont(10))
+                                        .foregroundStyle(FakeItTheme.textSecondary)
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(FakeItTheme.textSecondary.opacity(0.55))
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.trailing, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.leading, 4)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(FakeItTheme.panelStroke, lineWidth: 1))
+                }
+            }
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center) {
+                panelSectionLabel("Recent")
+                Spacer(minLength: 8)
+                Button("Clear all") {
+                    historyStore.clearAll()
+                    recent = []
+                }
+                .font(FakeItTheme.bodyFont(11, weight: .semibold))
+                .foregroundStyle(FakeItTheme.actionBlue)
+                .buttonStyle(.plain)
+                .disabled(recent.isEmpty)
+                .opacity(recent.isEmpty ? 0.38 : 1)
+            }
+            if recent.isEmpty {
+                Text("No spoof history yet.")
+                    .font(FakeItTheme.bodyFont(11))
+                    .foregroundStyle(FakeItTheme.textSecondary.opacity(0.8))
+            } else {
+                ForEach(recent.prefix(10)) { item in
+                    HStack(alignment: .center, spacing: 8) {
+                        Button {
+                            historyStore.remove(id: item.id)
+                            recent = historyStore.load()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 17))
+                                .foregroundStyle(FakeItTheme.textSecondary.opacity(0.5))
+                                .symbolRenderingMode(.hierarchical)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove from history")
+
                         Button {
                             reapplyRecent(item)
                         } label: {
@@ -302,74 +510,45 @@ struct ContentView: View {
                                         .font(FakeItTheme.bodyFont(10))
                                         .foregroundStyle(FakeItTheme.textSecondary)
                                 }
-                                Spacer()
-                                Image(systemName: "bolt.fill")
-                                    .foregroundStyle(FakeItTheme.accent.opacity(0.85))
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(FakeItTheme.textSecondary.opacity(0.55))
                             }
-                            .padding(8)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                            .padding(.vertical, 10)
+                            .padding(.trailing, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
+                    .padding(.leading, 4)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(FakeItTheme.panelStroke, lineWidth: 1))
                 }
-            }
-
-            Spacer(minLength: 0)
-
-            SpoofActionButton(
-                phase: $spoofPhase,
-                canSimulate: canSimulateOnDevice,
-                onSpoof: { performSpoof() },
-                onResetIdle: {
-                    spoofPhase = .idle
-                    mapState.pinSuccessGlow = false
-                    lastInjectionError = ""
-                }
-            )
-
-            Button("Reset Location") {
-                runReset()
-            }
-            .buttonStyle(.bordered)
-            .tint(FakeItTheme.textSecondary)
-            .foregroundStyle(FakeItTheme.textPrimary)
-            .controlSize(.large)
-            .frame(maxWidth: .infinity)
-
-            if !lastInjectionError.isEmpty, case .failure = spoofPhase {
-                Text(lastInjectionError)
-                    .font(FakeItTheme.bodyFont(10))
-                    .foregroundStyle(Color.red.opacity(0.9))
-                    .lineLimit(6)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(FakeItTheme.card.opacity(0.55))
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [FakeItTheme.accent.opacity(0.35), FakeItTheme.secondaryAccent.opacity(0.25)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.35), radius: 22, x: 0, y: 12)
+    }
+
+    private func clearSearchQuery() {
+        search.clearSearch()
+        searchExpanded = false
+        selectedCompletionIndex = nil
+        mapState.invalidateSimulationUnlock()
+    }
+
+    private func panelSectionLabel(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.6)
+            .foregroundStyle(FakeItTheme.textSecondary.opacity(0.75))
     }
 
     private var bottomCenterHUD: some View {
-        HStack(spacing: 14) {
-            Text("📍")
+        HStack(spacing: 12) {
+            Image(systemName: "mappin.and.ellipse")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(FakeItTheme.textSecondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(mapState.spoofHUDTitle)
                     .font(FakeItTheme.bodyFont(13, weight: .semibold))
@@ -383,10 +562,10 @@ struct ContentView: View {
         .padding(.vertical, 12)
         .background(
             Capsule(style: .continuous)
-                .fill(FakeItTheme.card.opacity(0.92))
-                .overlay(Capsule(style: .continuous).stroke(FakeItTheme.accent.opacity(0.22), lineWidth: 1))
+                .fill(FakeItTheme.panelSurface.opacity(0.95))
+                .overlay(Capsule(style: .continuous).stroke(FakeItTheme.panelStroke, lineWidth: 1))
         )
-        .shadow(color: .black.opacity(0.35), radius: 16, x: 0, y: 8)
+        .shadow(color: .black.opacity(0.2), radius: 14, x: 0, y: 6)
         .frame(maxWidth: .infinity)
     }
 
@@ -480,8 +659,11 @@ struct ContentView: View {
     private func flyToPlacemark(_ item: MKMapItem) {
         let c = item.placemark.coordinate
         guard CLLocationCoordinate2DIsValid(c) else { return }
-        mapState.addressLine = SearchCompleterModel.displayTitle(for: item)
+        let title = SearchCompleterModel.displayTitle(for: item)
+        mapState.addressLine = title
         mapState.setSelectedCoordinate(c, fly: true, dropAnimation: true, unlockSimulation: true)
+        searchHistoryStore.prepend(SavedSpoofLocation(name: title, latitude: c.latitude, longitude: c.longitude))
+        searchHistory = searchHistoryStore.load()
         skipNextSearchQueryReaction = true
         search.queryFragment = ""
         searchExpanded = false
@@ -501,6 +683,18 @@ struct ContentView: View {
         mapState.setSelectedCoordinate(c, fly: true, dropAnimation: true, unlockSimulation: true)
         skipNextSearchQueryReaction = true
         search.queryFragment = ""
+        selectedCompletionIndex = nil
+    }
+
+    private func reapplySearchHistory(_ item: SavedSpoofLocation) {
+        let c = CLLocationCoordinate2D(latitude: item.latitude, longitude: item.longitude)
+        mapState.addressLine = item.name
+        mapState.setSelectedCoordinate(c, fly: true, dropAnimation: true, unlockSimulation: true)
+        searchHistoryStore.prepend(item)
+        searchHistory = searchHistoryStore.load()
+        skipNextSearchQueryReaction = true
+        search.queryFragment = ""
+        searchExpanded = false
         selectedCompletionIndex = nil
     }
 
@@ -528,10 +722,6 @@ struct ContentView: View {
                     mapState.isSpoofActive = true
                     mapState.spoofHUDTitle = mapState.addressLine == "—" ? "Spoofed location" : mapState.addressLine
                     mapState.pinSuccessGlow = true
-                    showParticles = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        showParticles = false
-                    }
                     let entry = SavedSpoofLocation(
                         name: mapState.spoofHUDTitle,
                         latitude: coord.latitude,
@@ -595,7 +785,7 @@ private struct PinInfoFloatingCard: View {
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(FakeItTheme.accent)
+                        .foregroundStyle(FakeItTheme.actionBlue)
                 }
                 .buttonStyle(.plain)
                 .help("Copy coordinates")
@@ -612,14 +802,14 @@ private struct PinInfoFloatingCard: View {
         }
         .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(FakeItTheme.card.opacity(0.94))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(FakeItTheme.panelSurface.opacity(0.96))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(FakeItTheme.accent.opacity(0.35), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(FakeItTheme.panelStroke, lineWidth: 1)
                 )
         )
-        .shadow(color: .black.opacity(0.4), radius: 14, x: 0, y: 8)
+        .shadow(color: .black.opacity(0.22), radius: 12, x: 0, y: 6)
     }
 }
 
@@ -702,15 +892,9 @@ private struct SpoofActionButton: View {
         switch phase {
         case .idle:
             if idleDisabled {
-                return AnyShapeStyle(Color.primary.opacity(0.28))
+                return AnyShapeStyle(Color.white.opacity(0.12))
             }
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [FakeItTheme.accent, FakeItTheme.accent.opacity(0.82)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            return AnyShapeStyle(FakeItTheme.actionBlue)
         case .injecting:
             return AnyShapeStyle(Color.primary.opacity(0.35))
         case .success:
@@ -718,29 +902,5 @@ private struct SpoofActionButton: View {
         case .failure:
             return AnyShapeStyle(Color.red.opacity(0.78))
         }
-    }
-}
-
-// MARK: - Particles
-
-private struct ParticleBurstView: View {
-    var isActive: Bool
-
-    var body: some View {
-        ZStack {
-            if isActive {
-                ForEach(0..<14, id: \.self) { i in
-                    let angle = Double(i) / 14.0 * Double.pi * 2
-                    Circle()
-                        .fill(i % 2 == 0 ? FakeItTheme.accent : FakeItTheme.secondaryAccent)
-                        .frame(width: 4, height: 4)
-                        .offset(x: cos(angle) * 52, y: sin(angle) * 52 - 24)
-                        .opacity(0.95)
-                        .transition(.opacity)
-                }
-            }
-        }
-        .allowsHitTesting(false)
-        .animation(.easeOut(duration: 0.45), value: isActive)
     }
 }
